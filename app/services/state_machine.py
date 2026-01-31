@@ -1,6 +1,20 @@
 import re
+import os
+from datetime import datetime
 from app.domain.states import ConversationState
 
+# =========================
+# CONFIG
+# =========================
+
+ORDERS_DIR = "orders"
+
+if not os.path.exists(ORDERS_DIR):
+    os.makedirs(ORDERS_DIR)
+
+# =========================
+# HELPERS
+# =========================
 
 def _format_items(items):
     lines = []
@@ -11,41 +25,34 @@ def _format_items(items):
             lines.append(f"- {qty} {name}")
     return "\n".join(lines) if lines else "- (sin items)"
 
-
 def _build_summary(data):
-    items_txt = _format_items(data.get("items", []))
-
-    delivery = data.get("delivery_method")
-    if delivery == "envio":
-        delivery_txt = "Envío"
-    elif delivery == "retiro":
-        delivery_txt = "Retiro"
-    else:
-        delivery_txt = "(sin definir)"
-
-    address = data.get("address")
-    address_txt = address if address else "-"
-
-    pay = data.get("payment_method")
-    if pay == "efectivo":
-        pay_txt = "Efectivo"
-    elif pay == "transferencia":
-        pay_txt = "Transferencia"
-    else:
-        pay_txt = "(sin definir)"
-
-    name = data.get("name", "-")
-
     return (
         "🧾 *Resumen del pedido*\n"
-        f"{items_txt}\n\n"
-        f"🚚 Modalidad: {delivery_txt}\n"
-        f"📍 Dirección: {address_txt}\n"
-        f"💳 Pago: {pay_txt}\n"
-        f"🙋 Nombre: {name}\n\n"
+        f"{_format_items(data.get('items', []))}\n\n"
+        f"🚚 Modalidad: {data.get('delivery_method','-')}\n"
+        f"📍 Dirección: {data.get('address','-')}\n"
+        f"💳 Pago: {data.get('payment_method','-')}\n"
+        f"🙋 Nombre: {data.get('name','-')}\n\n"
         "¿Confirmás? (si / no)"
     )
 
+def save_order_txt(data):
+    now = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    filename = f"{ORDERS_DIR}/order_{now}.txt"
+
+    content = (
+        "===== NUEVO PEDIDO =====\n"
+        f"Fecha: {now}\n\n"
+        f"{_build_summary(data)}\n"
+        "========================\n"
+    )
+
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(content)
+
+# =========================
+# MAIN FSM
+# =========================
 
 def handle_message(state, text, data):
     text = (text or "").lower().strip()
@@ -58,45 +65,29 @@ def handle_message(state, text, data):
             "Hola! Soy Vendobot 🤖 ¿Querés hacer un pedido?"
         )
 
-    # -------- GREETING (se comporta como pedido) ----------
+    # -------- GREETING ----------
     if state == ConversationState.GREETING:
         state = ConversationState.AWAITING_ORDER
 
     # -------- AWAITING_ORDER ----------
     if state == ConversationState.AWAITING_ORDER:
 
-        def clean_item_name(s: str) -> str:
-            s = (s or "").lower().strip()
-
-            # separadores comunes → espacio
+        def clean_item_name(s):
+            s = s.lower()
             s = s.replace("+", " ")
-            s = re.sub(r"\s+", " ", s)
-
-            # sacar conectores como palabras completas
             s = re.sub(r"\b(y|con|de|del|la|el|los|las)\b", " ", s)
-
-            # limpiar espacios repetidos
             s = re.sub(r"\s+", " ", s).strip()
 
-            # sacar puntuación al final
-            s = re.sub(r"[.,;:]+$", "", s).strip()
-
-            # mini-normalizaciones (opcional)
-            # "hamb" => "hamburguesa"
-            if s in ("hamb", "ham", "hambur", "hamburg"):
+            if s in ["hamb", "ham", "hambur"]:
                 s = "hamburguesa"
 
             return s
 
         items = []
-
-        # Acepta: "2 hamburguesas", "1 coca", también con + o con y en el medio.
-        matches = re.findall(r"(\d+)\s+([a-zA-ZáéíóúñüÁÉÍÓÚÑÜ ]+)", text)
+        matches = re.findall(r"(\d+)\s+([a-zA-Záéíóúñü ]+)", text)
 
         for qty, name in matches:
             name = clean_item_name(name)
-            if not name:
-                continue
             items.append({
                 "name": name,
                 "qty": int(qty)
@@ -106,7 +97,7 @@ def handle_message(state, text, data):
             return (
                 ConversationState.AWAITING_ORDER,
                 data,
-                "No entendí el pedido 😕 Probá: 2 hamburguesas y 1 coca"
+                "No entendí 😕 Probá: 2 hamburguesas y 1 coca"
             )
 
         data["items"] = items
@@ -119,22 +110,23 @@ def handle_message(state, text, data):
 
     # -------- ASK_DELIVERY ----------
     if state == ConversationState.ASK_DELIVERY:
-        if any(x in text for x in ["envio", "envío", "a domicilio", "domicilio", "mandalo", "mandámelo"]):
+
+        if any(w in text for w in ["envio", "envío", "domicilio"]):
             data["delivery_method"] = "envio"
-        elif any(x in text for x in ["retiro", "retirar", "paso a buscar", "voy a buscar", "busco", "buscar"]):
+        elif any(w in text for w in ["retiro", "buscar", "paso"]):
             data["delivery_method"] = "retiro"
         else:
             return (
                 ConversationState.ASK_DELIVERY,
                 data,
-                "Decime si es retiro o envío"
+                "¿Retiro o envío?"
             )
 
         if data["delivery_method"] == "envio":
             return (
                 ConversationState.ASK_ADDRESS,
                 data,
-                "Pasame tu dirección completa"
+                "Pasame tu dirección"
             )
 
         return (
@@ -145,12 +137,12 @@ def handle_message(state, text, data):
 
     # -------- ASK_ADDRESS ----------
     if state == ConversationState.ASK_ADDRESS:
-        # dirección demasiado corta => repregunta
+
         if len(text) < 5:
             return (
                 ConversationState.ASK_ADDRESS,
                 data,
-                "Me pasás la dirección completa? (calle + número, y si hay dpto/barrio mejor)"
+                "Dirección más completa por favor"
             )
 
         data["address"] = text
@@ -163,32 +155,26 @@ def handle_message(state, text, data):
 
     # -------- ASK_PAYMENT ----------
     if state == ConversationState.ASK_PAYMENT:
+
         if "efectivo" in text:
             data["payment_method"] = "efectivo"
-        elif any(x in text for x in ["transfer", "transf", "mercado pago", "mp", "alias", "cbu"]):
+        elif any(w in text for w in ["transfer", "mp", "mercado"]):
             data["payment_method"] = "transferencia"
         else:
             return (
                 ConversationState.ASK_PAYMENT,
                 data,
-                "Decime efectivo o transferencia"
+                "Efectivo o transferencia?"
             )
 
         return (
             ConversationState.ASK_NAME,
             data,
-            "¿A nombre de quién preparo el pedido?"
+            "¿A nombre de quién?"
         )
 
     # -------- ASK_NAME ----------
     if state == ConversationState.ASK_NAME:
-        # si el usuario vuelve a decir "transferencia" acá, NO lo tomamos como nombre
-        if any(x in text for x in ["transfer", "transf", "mercado pago", "mp"]):
-            return (
-                ConversationState.ASK_NAME,
-                data,
-                "Perfecto. Ahora decime tu nombre 🙂"
-            )
 
         if len(text) < 2:
             return (
@@ -199,51 +185,47 @@ def handle_message(state, text, data):
 
         data["name"] = text
 
-        # ✅ NUEVO: pasamos a confirmación antes del DONE
         return (
             ConversationState.ASK_CONFIRM,
             data,
             _build_summary(data)
         )
 
-    # -------- ASK_CONFIRM (NUEVO) ----------
+    # -------- ASK_CONFIRM ----------
     if state == ConversationState.ASK_CONFIRM:
-        yes = ["si", "sí", "dale", "ok", "oka", "confirmo", "confirmar", "de una", "listo"]
-        no = ["no", "cancelar", "cancelo", "anular", "cambio", "modificar", "reiniciar"]
 
-        if any(w == text or w in text for w in yes):
+        if text in ["si", "sí", "ok", "dale", "confirmo"]:
+            save_order_txt(data)
             return (
                 ConversationState.DONE,
                 data,
-                "Perfecto ✅ Quedó confirmado. En breve te confirmo el total. 🙌"
+                "Pedido confirmado ✅ En breve te confirmo el total."
             )
 
-        if any(w == text or w in text for w in no):
-            # reiniciamos pedido (simple y seguro)
+        if text in ["no", "cancelar"]:
             return (
                 ConversationState.AWAITING_ORDER,
                 {},
-                "Dale, cancelamos y arrancamos de nuevo 😊 Decime tu pedido (ej: 2 hamburguesas y 1 coca)."
+                "Perfecto, arrancamos de nuevo. ¿Qué querés pedir?"
             )
 
         return (
             ConversationState.ASK_CONFIRM,
             data,
-            "Decime **si** para confirmar o **no** para cancelar."
+            "Respondé si o no"
         )
 
     # -------- DONE ----------
     if state == ConversationState.DONE:
-        # si el usuario escribe algo después, lo invitamos a pedir de nuevo
         return (
             ConversationState.NEW,
             {},
-            "Si querés hacer otro pedido, escribime: hola 🙂"
+            "Si querés hacer otro pedido escribí hola 🙂"
         )
 
     # -------- FALLBACK ----------
     return (
         ConversationState.NEW,
         {},
-        "Arranquemos de nuevo. Escribí hola."
+        "Escribí hola para empezar"
     )

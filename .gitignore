@@ -3,3 +3,9 @@ __pycache__/
 *.pyc
 .env
 vendobot.egg-info/
+# DB local
+*.sqlite3
+
+# Comandas generadas
+orders/
+

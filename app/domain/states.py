@@ -9,5 +9,5 @@ class ConversationState(str, Enum):
     ASK_ADDRESS = "ASK_ADDRESS"
     ASK_PAYMENT = "ASK_PAYMENT"
     ASK_NAME = "ASK_NAME"
-    ASK_CONFIRM = "ASK_CONFIRM"  # <- NUEVO
+    ASK_CONFIRM = "ASK_CONFIRM"
     DONE = "DONE"
