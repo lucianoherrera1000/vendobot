@@ -1,0 +1,20 @@
+[project]
+name = "vendobot"
+version = "0.1.0"
+description = "WhatsApp sales bot with state machine + SQLite + optional AI JSON extraction"
+requires-python = ">=3.10"
+
+dependencies = [
+  "flask>=3.0.0",
+  "python-dotenv>=1.0.0",
+  "requests>=2.31.0"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+  "ruff>=0.6.0"
+]
+
+[tool.ruff]
+line-length = 100
