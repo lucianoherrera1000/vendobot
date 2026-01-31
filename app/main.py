@@ -1,67 +1,53 @@
-from flask import Flask, jsonify, request
+from flask import Flask, request, jsonify
 
-from app.db.conn import init_db
-from app.db.repository import get_session, reset_session, upsert_session
-from app.services.state_machine import StateMachine
+from app.services.state_machine import handle_message
 from app.domain.states import ConversationState
 
 app = Flask(__name__)
 
-# Inicializa DB al levantar
-init_db()
-
-sm = StateMachine()
+# memoria simple en RAM
+sessions = {}
 
 
-@app.get("/health")
-def health():
-    return jsonify({"status": "ok"})
-
-
-@app.post("/debug/reset/<phone>")
-def debug_reset(phone: str):
-    existed = reset_session(phone)
-    return jsonify(
-        {
-            "ok": True,
-            "phone": phone,
-            "message": "Sesión borrada" if existed else "No existía",
+def get_session(phone):
+    if phone not in sessions:
+        sessions[phone] = {
+            "state": ConversationState.NEW,
+            "data": {}
         }
-    )
+    return sessions[phone]
 
 
-@app.post("/debug/step")
+@app.route("/debug/reset/<phone>", methods=["POST"])
+def reset(phone):
+    sessions.pop(phone, None)
+    return jsonify({"ok": True, "phone": phone})
+
+
+@app.route("/debug/step", methods=["POST"])
 def debug_step():
-    payload = request.get_json(force=True) or {}
-    phone = payload.get("phone", "test")
-    text = payload.get("text", "")
+    payload = request.get_json()
 
-    # Si force_state=true, usás el estado/data del payload.
-    # Si no, siempre continúa desde lo guardado en DB.
-    force_state = bool(payload.get("force_state", False))
+    phone = payload["phone"]
+    text = payload["text"]
 
-    if force_state:
-        state = payload.get("state", ConversationState.NEW)
-        data = payload.get("data") or {}
-        state_used = state
-    else:
-        state, data = get_session(phone)
-        state_used = state
+    session = get_session(phone)
+    state = session["state"]
+    data = session["data"]
 
-    result = sm.handle_message(state=state, text=text, data=data)
+    next_state, new_data, reply = handle_message(state, text, data)
 
-    # Guardar sesión actualizada
-    upsert_session(phone, result.next_state, result.data)
+    session["state"] = next_state
+    session["data"] = new_data
 
-    return jsonify(
-        {
-            "data": result.data,
-            "next_state": result.next_state,
-            "reply_text": result.reply_text,
-            "state_used": state_used,
-        }
-    )
+    return jsonify({
+        "state_used": state,
+        "next_state": next_state,
+        "reply_text": reply,
+        "data": new_data
+    })
 
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5000, debug=True)
+    app.run(debug=True)
+
