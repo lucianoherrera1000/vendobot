@@ -112,7 +112,6 @@ def webhook_receive():
     Extrae texto entrante y responde con tu state_machine.
     """
     payload = request.get_json(silent=True) or {}
-    # print(payload)  # si querés debug crudo
 
     try:
         entry = payload.get("entry", [])
@@ -195,8 +194,4 @@ def debug_step():
 # RUN
 # =========================
 if __name__ == "__main__":
-    # Importante: Cloud API llama desde fuera -> host 0.0.0.0 para que ngrok lo vea bien
-    # En Windows local igual funciona.
     app.run(host="0.0.0.0", port=5000, debug=True)
-
-
