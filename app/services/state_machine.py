@@ -1,350 +1,392 @@
+# app/services/state_machine.py
 import re
-import os
-from datetime import datetime
+from enum import Enum
 
-from app.domain.states import ConversationState
-
-# =========================================================
-# AI (fallback)
-# =========================================================
-# Si todavía no creaste app/services/ai_client.py, NO rompe:
+# Intentamos importar IA (no rompe si no existe)
 try:
-    from app.services.ai_client import llama_extract
+    from app.services.llama_client import llama_extract, AI_ENABLED
 except Exception:
     llama_extract = None
+    AI_ENABLED = False
 
 
-# =========================================================
-# CONFIG
-# =========================================================
-ORDERS_DIR = "orders"
-MENU_FILE = "menu.txt"
-
-if not os.path.exists(ORDERS_DIR):
-    os.makedirs(ORDERS_DIR)
-
-
-# =========================================================
-# HELPERS: MENU
-# =========================================================
-def _read_menu_text_safe() -> str:
-    try:
-        with open(MENU_FILE, "r", encoding="utf-8") as f:
-            return f.read().strip()
-    except Exception:
-        return ""
+class ConversationState(str, Enum):
+    NEW = "NEW"
+    AWAITING_ORDER = "AWAITING_ORDER"
+    ASK_DELIVERY = "ASK_DELIVERY"
+    ASK_ADDRESS = "ASK_ADDRESS"
+    ASK_PAYMENT = "ASK_PAYMENT"
+    ASK_NAME = "ASK_NAME"
+    ASK_CONFIRM = "ASK_CONFIRM"
+    DONE = "DONE"
 
 
-def _normalize_product_word(word: str) -> str:
-    w = (word or "").lower().strip()
-    # sinónimos básicos (podés extender cuando quieras)
-    synonyms = {
-        "fideos": "tallarines",
-        "pasta": "tallarines",
-        "coca cola": "coca",
-        "cocacola": "coca",
-        "hamb": "hamburguesa",
-        "ham": "hamburguesa",
-        "hambur": "hamburguesa",
-        "hamburg": "hamburguesa",
-    }
-    return synonyms.get(w, w)
-
-
-def _is_menu_request(text: str) -> str | None:
-    """
-    Detecta preguntas tipo:
-      - "tienen coca?"
-      - "hoy hay fideos?"
-      - "menu?"
-      - "que tienen?"
-    Devuelve el producto consultado o None.
-    """
-    t = (text or "").lower().strip()
-
-    # preguntas genéricas de menú
-    if any(x in t for x in ["menu", "menú", "que tienen", "qué tienen", "carta", "lista"]):
-        return ""  # significa "pedir menú completo"
-
-    m = re.search(r"(tienen|hay|venden|sale)\s+([a-zA-Záéíóúñü ]+)\??$", t)
-    if m:
-        prod = m.group(2).strip()
-        return _normalize_product_word(prod)
-
-    # "hoy tienen fideos?" (más flexible)
-    m2 = re.search(r"(hoy\s+)?(tienen|hay)\s+([a-zA-Záéíóúñü ]+)\??", t)
-    if m2:
-        prod = m2.group(3).strip()
-        return _normalize_product_word(prod)
-
-    return None
-
+# ----------------------------
+# Helpers de texto / menú
+# ----------------------------
 
 def _menu_intro_text() -> str:
-    menu = _read_menu_text_safe()
-    if not menu:
-        return "Hola! Somos *Marietta* 👋\nHoy no pude cargar el menú todavía. Decime qué querés pedir 😊"
     return (
         "Hola! Somos *Marietta* 👋\n"
         "📋 *Menú del día:*\n"
-        f"{menu}\n\n"
+        f"{_read_menu_text_safe()}\n"
         "Decime tu pedido con cantidades (ej: *2 hamburguesas y 1 coca*)."
     )
 
 
-def _answer_menu_question(query: str | None) -> str:
-    menu = _read_menu_text_safe()
-
-    # si no hay menu.txt
-    if not menu:
-        return "Hoy no tengo el menú cargado 😕 Decime qué querés y te digo si se puede."
-
-    # si pidió menú completo
-    if query is None or query == "":
-        return (
-            "📋 *Menú del día:*\n"
-            f"{menu}\n\n"
-            "Decime tu pedido con cantidades (ej: *2 hamburguesas y 1 coca*)."
-        )
-
-    q = _normalize_product_word(query)
-
-    if q in menu.lower():
-        return f"Sí ✅ Hoy tenemos *{q}*.\n¿Querés pedir? Decime cantidades (ej: 2 hamburguesas y 1 coca)."
-    else:
-        return (
-            f"No 😕 Hoy no tenemos *{query}*.\n"
-            "Podés pedir cualquiera de los items del menú 👇\n"
-            f"{menu}\n\n"
-            "Decime tu pedido con cantidades (ej: 2 hamburguesas y 1 coca)."
-        )
-
-
-# =========================================================
-# HELPERS: ORDER SAVE + SUMMARY
-# =========================================================
-def _format_items(items):
-    lines = []
-    for it in items or []:
-        qty = it.get("qty", 0)
-        name = it.get("name", "")
-        if name:
-            # qty puede venir None si lo mandó IA sin cantidad
-            if qty is None:
-                lines.append(f"- {name} (sin cantidad)")
-            else:
-                lines.append(f"- {qty} {name}")
-    return "\n".join(lines) if lines else "- (sin items)"
-
-
-def _build_summary(data):
+def _read_menu_text_safe() -> str:
+    # Si vos ya lo leés desde archivo en otro lado, podés reemplazar esto.
+    # Mantengo un menú simple como el que venís usando.
     return (
-        "🧾 *Resumen del pedido*\n"
-        f"{_format_items(data.get('items', []))}\n\n"
-        f"🚚 Modalidad: {data.get('delivery_method','-')}\n"
-        f"📍 Dirección: {data.get('address','-')}\n"
-        f"💳 Pago: {data.get('payment_method','-')}\n"
-        f"🙋 Nombre: {data.get('name','-')}\n\n"
-        "¿Confirmás? (si / no)"
+        "📋 MENÚ MARIETTA (HOY)\n\n"
+        "🍔 Hamburguesa simple $9000\n"
+        "🍔 Hamburguesa doble $12000\n"
+        "🍟 Papas $5000\n"
+        "🍝 Tallarines $10000\n"
+        "🥟 Empanadas de pollo $1500\n"
+        "🥟 Empanadas de carne $1500\n"
+        "🥤 Coca $2000\n"
     )
 
 
-def save_order_txt(data):
-    now = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    filename = f"{ORDERS_DIR}/order_{now}.txt"
-
-    content = (
-        "===== NUEVO PEDIDO =====\n"
-        f"Fecha: {now}\n\n"
-        f"{_build_summary(data)}\n"
-        "========================\n"
-    )
-
-    with open(filename, "w", encoding="utf-8") as f:
-        f.write(content)
+def _is_menu_request(text: str):
+    t = (text or "").strip().lower()
+    # preguntas típicas
+    if any(k in t for k in ["menú", "menu", "carta", "tienen", "tenes", "tendran", "hay "]):
+        # devolvemos el texto para contestar “sí/no” o “menú completo”
+        return t
+    return None
 
 
-# =========================================================
-# HELPERS: ORDER PARSER (REGEX)
-# =========================================================
-def _clean_item_name(s: str) -> str:
-    s = (s or "").lower().strip()
+def _answer_menu_question(query: str) -> str:
+    # respuesta ultra simple (la tuya ya andaba muy bien)
+    menu = _read_menu_text_safe()
+    q = (query or "").strip().lower()
 
-    # separadores comunes → espacio
-    s = s.replace("+", " ")
-    s = re.sub(r"\s+", " ", s)
+    # si pregunta genérica, devolvemos menú
+    if q in ["", "menu", "menú", "que tienen", "qué tienen", "carta"]:
+        return "📋 *Menú del día:*\n" + menu + "\nDecime tu pedido con cantidades (ej: *2 hamburguesas y 1 coca*)."
 
-    # sacar conectores como palabras completas
-    s = re.sub(r"\b(y|con|de|del|la|el|los|las)\b", " ", s)
+    # si pregunta por un item puntual:
+    # ejemplo: "tienen coca?"
+    items = _menu_items_keywords()
+    for it in items:
+        if it in q:
+            return f"Sí ✅ Hoy tenemos *{it}*.\n¿Querés pedir? Decime cantidades (ej: 2 hamburguesas y 1 coca)."
 
-    # limpiar espacios repetidos
-    s = re.sub(r"\s+", " ", s).strip()
+    # “fideos” => tallarines (sinónimos)
+    if "fideos" in q:
+        return "Sí ✅ Hoy tenemos *tallarines*.\n¿Querés pedir? Decime cantidades (ej: 2 hamburguesas y 1 coca)."
 
-    # sacar puntuación al final
-    s = re.sub(r"[.,;:]+$", "", s).strip()
+    return "📋 *Menú del día:*\n" + menu + "\nDecime tu pedido con cantidades (ej: *2 hamburguesas y 1 coca*)."
 
-    # mini-normalizaciones
-    s = _normalize_product_word(s)
 
-    return s
+def _menu_items_keywords():
+    # keywords base (minúsculas)
+    return [
+        "hamburguesa",
+        "hamburguesa simple",
+        "hamburguesa doble",
+        "papas",
+        "tallarines",
+        "empanadas de pollo",
+        "empanadas de carne",
+        "coca",
+    ]
+
+
+# ----------------------------
+# Parse regex (sin IA)
+# ----------------------------
+
+_NUM_WORDS = {
+    "un": 1, "una": 1, "uno": 1,
+    "dos": 2, "tres": 3, "cuatro": 4, "cinco": 5,
+    "seis": 6, "siete": 7, "ocho": 8, "nueve": 9,
+    "diez": 10, "once": 11, "doce": 12,
+    "trece": 13, "catorce": 14, "quince": 15,
+    "veinte": 20
+}
+
+def _word_to_int(token: str):
+    token = (token or "").strip().lower()
+    return _NUM_WORDS.get(token)
+
+
+def _clean_item_name(name: str) -> str:
+    n = (name or "").strip().lower()
+
+    # normalizaciones mínimas
+    n = n.replace("hamb", "hamburguesa")
+    n = n.replace("hamburguesas", "hamburguesa")
+    n = n.replace("cocas", "coca")
+
+    # si dijo “hamburguesa doble” la dejamos así
+    if "hamburguesa" in n and "doble" in n:
+        return "hamburguesa doble"
+    if "hamburguesa" in n and "simple" in n:
+        return "hamburguesa simple"
+
+    # si solo dijo hamburguesa
+    if "hamburguesa" in n:
+        return "hamburguesa"
+
+    # papas
+    if "papas" in n or "papa" in n:
+        return "papas"
+
+    # tallarines / fideos
+    if "tallar" in n or "fideos" in n or "fideo" in n:
+        return "tallarines"
+
+    # empanadas
+    if "empan" in n and "pollo" in n:
+        return "empanadas de pollo"
+    if "empan" in n and "carne" in n:
+        return "empanadas de carne"
+    if "empan" in n:
+        return "empanadas"
+
+    # coca
+    if "coca" in n:
+        return "coca"
+
+    return n
 
 
 def _parse_items_regex(text: str):
     """
-    Acepta:
-      - "2 hamburguesas y 1 coca"
-      - "2 hamb + 1 coca"
+    Devuelve lista items [{name, qty}] o [].
+    IMPORTANTE: acá NO tocamos address, NI otros campos.
     """
+    t = (text or "").strip().lower()
+    if not t:
+        return []
+
+    # casos: "2 hamb + 1 coca"
+    # o "quiero 12 hamburguesas"
+    # o "quiero doce hamburguesas"
     items = []
-    t = (text or "").lower().strip()
 
-    matches = re.findall(r"(\d+)\s+([a-zA-ZáéíóúñüÁÉÍÓÚÑÜ ]+)", t)
-    for qty, name in matches:
-        name = _clean_item_name(name)
-        if not name:
-            continue
-        items.append({"name": name, "qty": int(qty)})
+    # reemplazos para facilitar
+    t2 = t.replace("+", " ").replace(",", " ").replace("y", " ")
 
+    # tokenizamos
+    tokens = re.split(r"\s+", t2)
+
+    # patrón: numero/palabra-numero + item
+    # recorremos tokens buscando cantidades
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        qty = None
+
+        if tok.isdigit():
+            qty = int(tok)
+        else:
+            w = _word_to_int(tok)
+            if w is not None:
+                qty = w
+
+        if qty is not None:
+            # el nombre del item puede ocupar 1-3 tokens después
+            name_parts = []
+            for j in range(i + 1, min(i + 4, len(tokens))):
+                if tokens[j].isdigit() or _word_to_int(tokens[j]) is not None:
+                    break
+                name_parts.append(tokens[j])
+
+            name_raw = " ".join(name_parts).strip()
+            name = _clean_item_name(name_raw)
+
+            if name and name != "":
+                items.append({"name": name, "qty": qty})
+                i = i + 1 + len(name_parts)
+                continue
+
+        i += 1
+
+    # fallback simple: si dijo “hamburguesa doble” sin número => no sirve para regex
     return items
 
 
-# =========================================================
-# MAIN FSM
-# =========================================================
-def handle_message(state, text, data):
-    text = (text or "").lower().strip()
+# ----------------------------
+# Parsers de otros datos
+# ----------------------------
+
+def _parse_delivery(text: str):
+    t = (text or "").strip().lower()
+    if any(k in t for k in ["envio", "envío", "enviar", "a domicilio", "delivery"]):
+        return "envio"
+    if any(k in t for k in ["retiro", "retirar", "lo paso a buscar", "busco", "paso a buscar"]):
+        return "retiro"
+    return None
+
+
+def _parse_payment(text: str):
+    t = (text or "").strip().lower()
+    if "efectivo" in t:
+        return "efectivo"
+    if any(k in t for k in ["transfer", "transfe", "transferencia"]):
+        return "transferencia"
+    return None
+
+
+def _looks_like_address(text: str) -> bool:
+    t = (text or "").strip().lower()
+    # heurística básica: calle + número
+    return bool(re.search(r"[a-záéíóúñ]+\s+\d+", t))
+
+
+def _extract_name(text: str):
+    t = (text or "").strip()
+    if not t:
+        return None
+    # "soy lucho" => "lucho"
+    m = re.search(r"\bsoy\b\s+(.+)$", t, flags=re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+    return t.strip()
+
+
+# ----------------------------
+# FUNCIÓN PRINCIPAL
+# ----------------------------
+
+def handle_message(state: str, text: str, data: dict):
+    """
+    OBLIGATORIO: devuelve EXACTAMENTE 3 valores:
+      (next_state, new_data, reply_text)
+    """
+    if data is None:
+        data = {}
+    else:
+        data = dict(data)  # copia defensiva
+
+    state = (state or ConversationState.NEW).strip()
 
     # -------- NEW ----------
-    if state == ConversationState.NEW:
-        # si saluda/pide menú, mostramos menú directamente
-        q = _is_menu_request(text)
-        if q is not None:
-            return (ConversationState.AWAITING_ORDER, {}, _menu_intro_text())
-
-        # saludo simple
-        if any(x in text for x in ["hola", "buenas", "buen día", "buen dia", "buenas tardes", "buenas noches"]):
-            return (ConversationState.AWAITING_ORDER, {}, _menu_intro_text())
-
-        # default
-        return (ConversationState.AWAITING_ORDER, {}, _menu_intro_text())
+    if state == ConversationState.NEW or state == ConversationState.NEW.value:
+        return (ConversationState.AWAITING_ORDER.value, data, _menu_intro_text())
 
     # -------- AWAITING_ORDER ----------
-    if state == ConversationState.AWAITING_ORDER:
-        # 1) Preguntas de menú (sin IA)
+    if state == ConversationState.AWAITING_ORDER or state == ConversationState.AWAITING_ORDER.value:
+        # 1) preguntas de menú
         q = _is_menu_request(text)
-        if q is not None:
-            # "" => menú completo
-            return (ConversationState.AWAITING_ORDER, data, _answer_menu_question(q))
+        if q is not None and any(k in q for k in ["menu", "menú", "carta", "tienen", "tenes", "hay", "hoy"]):
+            return (ConversationState.AWAITING_ORDER.value, data, _answer_menu_question(q))
 
-        # 2) Intento regex (sin IA)
+        # 2) intento regex
         items = _parse_items_regex(text)
         if items:
             data["items"] = items
-            return (ConversationState.ASK_DELIVERY, data, "Genial 👍 ¿Es para retiro o envío?")
+            return (ConversationState.ASK_DELIVERY.value, data, "Genial 👍 ¿Es para retiro o envío?")
 
-        # 3) Fallback IA (solo si existe llama_extract)
-        if llama_extract:
-            menu_text = _read_menu_text_safe()
-            ai = llama_extract(text, menu_text=menu_text)
+        # 3) fallback IA (opcional y seguro)
+        if AI_ENABLED and llama_extract:
+            ai = llama_extract(text)
 
-            if isinstance(ai, dict):
-                intent = (ai.get("intent") or "").strip().lower()
+            if isinstance(ai, dict) and ai.get("ok") is True:
+                # items desde IA
+                ai_items = ai.get("items") or []
+                normalized = []
+                for it in ai_items:
+                    name = _clean_item_name(it.get("name", ""))
+                    qty = it.get("qty", None)
+                    if name:
+                        # si qty viene vacío, lo forzamos a 1 para no trabar el flujo
+                        if qty is None:
+                            qty = 1
+                        normalized.append({"name": name, "qty": qty})
 
-                # Si IA detecta pregunta menú
-                if intent == "menu_question":
-                    return (ConversationState.AWAITING_ORDER, data, _answer_menu_question(ai.get("menu_query")))
+                if normalized:
+                    data["items"] = normalized
+                    return (ConversationState.ASK_DELIVERY.value, data, "Genial 👍 ¿Es para retiro o envío?")
 
-                # Si IA detecta saludo/presentación
-                if intent == "greeting":
-                    return (ConversationState.AWAITING_ORDER, data, _menu_intro_text())
+                # si la IA devolvió cosas sueltas, las guardamos SIN romper address
+                for k in ["delivery_method", "payment_method", "name"]:
+                    if ai.get(k):
+                        data[k] = ai[k]
 
-                # Si IA detecta pedido sin cantidades o con info suelta
-                if intent == "order":
-                    ai_items = ai.get("items") or []
-                    normalized = []
-                    for it in ai_items:
-                        name = _clean_item_name(it.get("name", ""))
-                        qty = it.get("qty", None)
-                        if name:
-                            # qty puede ser None si no dijo cantidad
-                            normalized.append({"name": name, "qty": qty})
-                    if normalized:
-                        data["items"] = normalized
-                        return (ConversationState.ASK_DELIVERY, data, "Genial 👍 ¿Es para retiro o envío?")
+                # address solo si parece address real
+                if ai.get("address") and _looks_like_address(ai["address"]):
+                    data["address"] = ai["address"]
 
-        # Si no se pudo entender:
         return (
-            ConversationState.AWAITING_ORDER,
+            ConversationState.AWAITING_ORDER.value,
             data,
             "No entendí 😕 Decime tu pedido con cantidades (ej: *2 hamburguesas y 1 coca*)."
         )
 
     # -------- ASK_DELIVERY ----------
-    if state == ConversationState.ASK_DELIVERY:
-        if any(w in text for w in ["envio", "envío", "a domicilio", "domicilio", "mandalo", "mandámelo"]):
-            data["delivery_method"] = "envio"
-        elif any(w in text for w in ["retiro", "retirar", "paso a buscar", "paso a buscarlo", "voy a buscar", "busco", "buscar", "paso"]):
-            data["delivery_method"] = "retiro"
+    if state == ConversationState.ASK_DELIVERY or state == ConversationState.ASK_DELIVERY.value:
+        dm = _parse_delivery(text)
+        if not dm:
+            return (ConversationState.ASK_DELIVERY.value, data, "Decime si es retiro o envío")
+        data["delivery_method"] = dm
+        if dm == "envio":
+            return (ConversationState.ASK_ADDRESS.value, data, "Pasame tu dirección completa")
         else:
-            return (ConversationState.ASK_DELIVERY, data, "¿Retiro o envío?")
-
-        if data["delivery_method"] == "envio":
-            return (ConversationState.ASK_ADDRESS, data, "Pasame tu dirección completa")
-
-        return (ConversationState.ASK_PAYMENT, data, "¿Pagás en efectivo o transferencia?")
+            # retiro: no pedimos address
+            data.pop("address", None)
+            return (ConversationState.ASK_PAYMENT.value, data, "¿Pagás en efectivo o transferencia?")
 
     # -------- ASK_ADDRESS ----------
-    if state == ConversationState.ASK_ADDRESS:
-        if len(text) < 5:
-            return (
-                ConversationState.ASK_ADDRESS,
-                data,
-                "Me pasás la dirección completa? (calle + número, y si hay dpto/barrio mejor)"
-            )
-
-        data["address"] = text
-        return (ConversationState.ASK_PAYMENT, data, "¿Pagás en efectivo o transferencia?")
+    if state == ConversationState.ASK_ADDRESS or state == ConversationState.ASK_ADDRESS.value:
+        # guardamos lo que venga (acá sí corresponde)
+        data["address"] = (text or "").strip()
+        return (ConversationState.ASK_PAYMENT.value, data, "¿Pagás en efectivo o transferencia?")
 
     # -------- ASK_PAYMENT ----------
-    if state == ConversationState.ASK_PAYMENT:
-        if "efectivo" in text:
-            data["payment_method"] = "efectivo"
-        elif any(w in text for w in ["transfer", "transf", "mercado pago", "mp", "alias", "cbu"]):
-            data["payment_method"] = "transferencia"
-        else:
-            return (ConversationState.ASK_PAYMENT, data, "Efectivo o transferencia?")
-
-        return (ConversationState.ASK_NAME, data, "¿A nombre de quién?")
+    if state == ConversationState.ASK_PAYMENT or state == ConversationState.ASK_PAYMENT.value:
+        pm = _parse_payment(text)
+        if not pm:
+            return (ConversationState.ASK_PAYMENT.value, data, "Efectivo o transferencia?")
+        data["payment_method"] = pm
+        return (ConversationState.ASK_NAME.value, data, "¿A nombre de quién preparo el pedido?")
 
     # -------- ASK_NAME ----------
-    if state == ConversationState.ASK_NAME:
-        # Si vuelve a decir "transferencia" acá, no lo tomamos como nombre
-        if any(w in text for w in ["transfer", "transf", "mercado pago", "mp", "alias", "cbu"]):
-            return (ConversationState.ASK_NAME, data, "Perfecto. Ahora decime tu nombre 🙂")
-
-        if len(text) < 2:
-            return (ConversationState.ASK_NAME, data, "Decime un nombre válido")
-
-        data["name"] = text
-        return (ConversationState.ASK_CONFIRM, data, _build_summary(data))
+    if state == ConversationState.ASK_NAME or state == ConversationState.ASK_NAME.value:
+        name = _extract_name(text)
+        if name:
+            data["name"] = name.lower()
+        return (ConversationState.ASK_CONFIRM.value, data, _build_confirm(data))
 
     # -------- ASK_CONFIRM ----------
-    if state == ConversationState.ASK_CONFIRM:
-        yes = ["si", "sí", "ok", "dale", "confirmo", "confirmar", "de una", "listo"]
-        no = ["no", "cancelar", "cancelo", "anular", "cambio", "modificar", "reiniciar"]
-
-        if any(w == text or w in text for w in yes):
-            save_order_txt(data)
-            return (ConversationState.DONE, data, "Pedido confirmado ✅ En breve te confirmo el total.")
-
-        if any(w == text or w in text for w in no):
-            return (ConversationState.AWAITING_ORDER, {}, "Perfecto, arrancamos de nuevo. ¿Qué querés pedir?")
-
-        return (ConversationState.ASK_CONFIRM, data, "Respondé *si* o *no* 🙂")
+    if state == ConversationState.ASK_CONFIRM or state == ConversationState.ASK_CONFIRM.value:
+        t = (text or "").strip().lower()
+        if t in ["si", "sí", "s", "ok", "dale", "confirmo", "confirmar"]:
+            return (ConversationState.DONE.value, data, "Pedido confirmado ✅ En breve te confirmo el total.")
+        if t in ["no", "n", "cancelar"]:
+            return (ConversationState.NEW.value, {}, "Listo 👍 Si querés hacer otro pedido escribí *hola* 🙂")
+        return (ConversationState.ASK_CONFIRM.value, data, "Respondé si o no")
 
     # -------- DONE ----------
-    if state == ConversationState.DONE:
-        return (ConversationState.NEW, {}, "Si querés hacer otro pedido escribí *hola* 🙂")
+    if state == ConversationState.DONE or state == ConversationState.DONE.value:
+        return (ConversationState.NEW.value, {}, "Si querés hacer otro pedido escribí *hola* 🙂")
 
-    # -------- FALLBACK ----------
-    return (ConversationState.NEW, {}, "Escribí *hola* para empezar")
+    # fallback
+    return (ConversationState.NEW.value, {}, _menu_intro_text())
+
+
+def _build_confirm(data: dict) -> str:
+    items = data.get("items") or []
+    lines = ["🧾 *Resumen del pedido*"]
+    for it in items:
+        qty = it.get("qty", 1)
+        name = it.get("name", "")
+        lines.append(f"- {qty} {name}")
+
+    dm = data.get("delivery_method", "-")
+    addr = data.get("address", "-") if dm == "envio" else "-"
+    pm = data.get("payment_method", "-")
+    nm = data.get("name", "-")
+
+    lines.append("")
+    lines.append(f"🚚 Modalidad: {dm}")
+    lines.append(f"📍 Dirección: {addr}")
+    lines.append(f"💳 Pago: {pm}")
+    lines.append(f"🙋 Nombre: {nm}")
+    lines.append("")
+    lines.append("¿Confirmás? (si / no)")
+    return "\n".join(lines)

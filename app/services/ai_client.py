@@ -1,60 +1,58 @@
+import os
 import json
 import requests
 
-# Ajustá esto si tu llama-server escucha otro puerto
-LLAMA_BASE_URL = "http://127.0.0.1:8080"
+LLAMA_BASE_URL = os.getenv("LLAMA_BASE_URL", "http://127.0.0.1:8080")
+LLAMA_MODEL = os.getenv("LLAMA_MODEL", "model")
+LLAMA_TIMEOUT = int(os.getenv("LLAMA_TIMEOUT", "20"))
 
-SYSTEM_PROMPT = """
-Sos un extractor de información para un bot de pedidos de comida.
-Tu única salida debe ser JSON válido (sin texto extra, sin markdown).
-No inventes datos: si no está, devolvé null.
+SYSTEM_PROMPT = """Sos un extractor de datos para un bot de ventas.
+Tu tarea: devolver SOLO JSON válido, sin texto extra.
 
-Campos permitidos:
-- intent: "order" | "menu_question" | "greeting" | "other"
-- items: lista de { "name": string, "qty": int|null }
-- delivery_method: "envio" | "retiro" | null
-- address: string|null
-- payment_method: "efectivo" | "transferencia" | null
-- name: string|null
-- menu_query: string|null   (si pregunta por un producto: "fideos", "coca", etc.)
-- confidence: number (0 a 1)
+De un mensaje del cliente, extraé si podés:
+- items: lista de {name, qty}
+- delivery_method: "envio" o "retiro"
+- address: string
+- payment_method: "efectivo" o "transferencia"
+- name: string
+
+Si no encontrás nada, devolvé: {"ok":false}
+Si encontrás algo, devolvé: {"ok":true, ...campos...}
 
 Reglas:
-- Si el usuario dice "tienen X?" o "hay X?" => intent="menu_question" y menu_query="x"
-- Si hay intención de pedido pero sin cantidad ("quiero hamburguesa") => intent="order", qty=null
-- Si sólo saluda => intent="greeting"
+- qty default 1 si el usuario pide 1 cosa sin número (ej: "una coca" -> qty 1)
+- nombres en minúscula
+- no inventes items
 """
 
-def llama_extract(user_text: str, menu_text: str = "") -> dict | None:
-    """
-    Llama a un servidor tipo llama.cpp con endpoint OpenAI-compatible:
-      POST /v1/chat/completions
-    Si tu server no soporta ese endpoint, avisame y lo adapto al endpoint real.
-    """
+def llama_extract(text: str) -> dict:
+    if not text:
+        return {"ok": False}
+
     url = f"{LLAMA_BASE_URL}/v1/chat/completions"
     payload = {
-        "model": "local-model",
-        "temperature": 0,
+        "model": LLAMA_MODEL,
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT.strip()},
-            {"role": "user", "content": f"MENU:\n{menu_text}\n\nMENSAJE:\n{user_text}"}
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": text}
         ],
-        "stream": False
+        "temperature": 0,
     }
 
     try:
-        r = requests.post(url, json=payload, timeout=20)
-        r.raise_for_status()
-        data = r.json()
+        r = requests.post(url, json=payload, timeout=LLAMA_TIMEOUT)
+        if r.status_code >= 400:
+            return {"ok": False, "error": f"{r.status_code} {r.text}"}
 
-        # OpenAI style: choices[0].message.content
+        data = r.json()
         content = data["choices"][0]["message"]["content"].strip()
 
-        # A veces vienen backticks: los limpiamos
-        content = content.strip("` \n")
+        # el modelo debe devolver JSON directo
+        out = json.loads(content)
+        if isinstance(out, dict):
+            return out
+        return {"ok": False}
 
-        obj = json.loads(content)
-        return obj
     except Exception as e:
-        print("[AI] extract failed:", str(e))
-        return None
+        return {"ok": False, "error": str(e)}
+

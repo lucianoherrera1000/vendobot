@@ -1,4 +1,5 @@
 import os
+import time
 import requests
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify
@@ -24,6 +25,28 @@ app = Flask(__name__)
 
 # memoria simple en RAM (por teléfono)
 sessions = {}
+
+# dedupe simple para webhooks (evita respuestas duplicadas)
+# guardamos msg_id -> timestamp, y limpiamos por TTL
+SEEN_MSG_TTL_SEC = 60 * 10
+seen_msg_ids = {}  # { "wamid.xxx": 1700000000.0 }
+
+def _seen_before(msg_id: str) -> bool:
+    if not msg_id:
+        return False
+    now = time.time()
+    # cleanup ocasional
+    if len(seen_msg_ids) > 500:
+        cutoff = now - SEEN_MSG_TTL_SEC
+        for k, ts in list(seen_msg_ids.items()):
+            if ts < cutoff:
+                seen_msg_ids.pop(k, None)
+
+    if msg_id in seen_msg_ids:
+        return True
+
+    seen_msg_ids[msg_id] = now
+    return False
 
 
 def get_session(phone: str):
@@ -125,17 +148,23 @@ def webhook_receive():
                     continue
 
                 for msg in messages:
+                    msg_id = msg.get("id", "")
+                    if _seen_before(msg_id):
+                        # evita respuestas duplicadas
+                        continue
+
                     from_phone = msg.get("from")  # numero del cliente (string)
                     msg_type = msg.get("type", "")
 
-                    text = ""
-                    if msg_type == "text":
-                        text = (msg.get("text", {}) or {}).get("body", "")
-                    else:
-                        # Por ahora, si no es texto:
-                        text = ""
+                    # Solo soportamos texto por ahora (si no es texto, lo ignoramos)
+                    if msg_type != "text":
+                        continue
 
-                    if not from_phone:
+                    text = (msg.get("text", {}) or {}).get("body", "")
+                    text = (text or "").strip()
+
+                    # Si llega vacío, no hagas nada (evita "No entendí" fantasma)
+                    if not from_phone or not text:
                         continue
 
                     session = get_session(from_phone)
@@ -147,7 +176,6 @@ def webhook_receive():
                     session["state"] = next_state
                     session["data"] = new_data
 
-                    # Responder por WhatsApp
                     if reply_text:
                         send_whatsapp_text(from_phone, reply_text)
 
@@ -194,4 +222,7 @@ def debug_step():
 # RUN
 # =========================
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    # IMPORTANTE:
+    # - use_reloader=False evita doble ejecución en debug (y mensajes duplicados)
+    app.run(host="0.0.0.0", port=5000, debug=True, use_reloader=False)
+
